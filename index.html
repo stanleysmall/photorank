@@ -188,21 +188,42 @@
     }
 
     function generateBalancedPair() {
-      const idx1 = Math.floor(Math.random() * allPhotos.length);
+      if (!allPhotos || allPhotos.length < 2) return null;
+
+      // --- STEP 1: Weighted selection for Photo A (Higher Elo = Higher Probability) ---
+      // Shift ratings so the lowest rating starts at a baseline weight of 100, 
+      // preventing zero/negative weights and giving top photos a strong boost.
+      const minRating = Math.min(...allPhotos.map(p => p.rating || 1400));
+      const weights = allPhotos.map(p => {
+        const rating = p.rating || 1400;
+        return Math.max(10, rating - minRating + 100); 
+      });
+
+      const totalWeight = weights.reduce((a, b) => a + b, 0);
+      let randomWeight = Math.random() * totalWeight;
+      let idx1 = 0;
+
+      for (let i = 0; i < allPhotos.length; i++) {
+        randomWeight -= weights[i];
+        if (randomWeight <= 0) {
+          idx1 = i;
+          break;
+        }
+      }
       const photoA = allPhotos[idx1];
 
-      // Filter out candidates with the same base ID
+      // --- STEP 2: Filter out same-edit groups ---
       let candidates = allPhotos.filter(p => p.baseId !== photoA.baseId);
       if (candidates.length === 0) return generateBalancedPair();
 
-      // Sort candidates by closeness of Elo rating to photoA
+      // --- STEP 3: Sort candidates by closest Elo rating to Photo A ---
       candidates.sort((a, b) => {
-        const diffA = Math.abs(a.rating - photoA.rating);
-        const diffB = Math.abs(b.rating - photoA.rating);
+        const diffA = Math.abs((a.rating || 1400) - (photoA.rating || 1400));
+        const diffB = Math.abs((b.rating || 1400) - (photoA.rating || 1400));
         return diffA - diffB;
       });
 
-      // Pick randomly from the top 5 closest candidates
+      // --- STEP 4: Pick randomly from the top 5 closest candidates ---
       const poolSize = Math.max(1, Math.min(5, candidates.length));
       const selectedIdx = Math.floor(Math.random() * poolSize);
       const photoB = candidates[selectedIdx];
@@ -210,6 +231,7 @@
       const urlA = photoA.url || ("https://lh3.googleusercontent.com/d/" + photoA.driveId);
       const urlB = photoB.url || ("https://lh3.googleusercontent.com/d/" + photoB.driveId);
 
+      // --- STEP 5: Anti-duplicate check ---
       const sig = [photoA.id, photoB.id].sort().join("|");
       if (sig === lastPairSig && allPhotos.length > 5) {
         return generateBalancedPair();
