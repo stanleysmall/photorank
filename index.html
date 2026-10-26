@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Photo Rating App</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html {
+      width: 100%;
+      height: 100%;
+      background-color: #000000;
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .hidden { display: none !important; }
+
+    #error-view {
+      text-align: center;
+      padding: 20px;
+    }
+    #error-view h2 {
+      color: #ff4d4d;
+      font-size: 24px;
+      margin-bottom: 10px;
+    }
+    #error-view p {
+      color: #888;
+      font-size: 16px;
+    }
+
+    #loader {
+      font-size: 16px;
+      color: #666;
+      letter-spacing: 1px;
+    }
+
+    #photo-container {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      opacity: 1;
+      transition: opacity 0.1s ease-in-out;
+    }
+
+    #photo-container.fade-out {
+      opacity: 0;
+    }
+
+    .photo-card {
+      position: relative;
+      flex: 1;
+      height: 100%;
+      background: #111;
+      border-radius: 4px;
+      overflow: hidden;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .photo-card img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      pointer-events: none;
+    }
+
+    .overlay {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity 0.08s ease-in-out;
+      pointer-events: none;
+      font-size: 64px;
+      font-weight: bold;
+    }
+
+    .overlay.winner { background-color: rgba(46, 204, 113, 0.4); color: #2ecc71; }
+    .overlay.loser { background-color: rgba(231, 76, 60, 0.4); color: #e74c3c; }
+    .overlay.show { opacity: 1; }
+
+    @media (orientation: portrait) { #photo-container { flex-direction: column; } }
+    @media (orientation: landscape) { #photo-container { flex-direction: row; } }
+  </style>
+</head>
+<body>
+
+  <div id="error-view" class="hidden">
+    <h2>Session key invalid</h2>
+    <p>Please check your link and try again.</p>
+  </div>
+
+  <div id="loader">Loading...</div>
+
+  <div id="photo-container" class="hidden">
+    <div class="photo-card" id="cardA" onclick="handleVote('A')">
+      <img id="imgA" alt="Photo A">
+      <div class="overlay" id="overlayA">✓</div>
+    </div>
+    <div class="photo-card" id="cardB" onclick="handleVote('B')">
+      <img id="imgB" alt="Photo B">
+      <div class="overlay" id="overlayB">✕</div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "https://script.google.com/macros/s/AKfycbwGMd3JtrWrhILsvPw9lSuo-zc4wsfmuajb2uUa_U95GBy9Iu2McKNmGOoyZs_9BSrC/exec";
+
+    let currentSessionKey = "";
+    let allPhotos = [];
+    let currentPair = null;
+    let nextPair = null;
+    let isVotingLocked = false;
+    let lastPairSig = "";
+
+    window.addEventListener("DOMContentLoaded", () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      let sessionKey = urlParams.get("session");
+
+      if (sessionKey) {
+        sessionKey = sessionKey.trim();
+        localStorage.setItem("photo_rater_session", sessionKey);
+      } else {
+        sessionKey = localStorage.getItem("photo_rater_session");
+      }
+
+      if (!sessionKey) {
+        showError();
+        return;
+      }
+
+      currentSessionKey = sessionKey;
+      initApp();
+    });
+
+    function showError() {
+      document.getElementById("loader").classList.add("hidden");
+      document.getElementById("photo-container").classList.add("hidden");
+      document.getElementById("error-view").classList.remove("hidden");
+    }
+
+    async function initApp() {
+      try {
+        const response = await fetch(API_URL, {
+          method: "POST",
+          body: JSON.stringify({ action: "getInitData", sessionKey: currentSessionKey })
+        });
+        const res = await response.json();
+
+        if (res && res.status === "success" && res.photos && res.photos.length >= 2) {
+          allPhotos = res.photos;
+          
+          console.log(`[Init] Loaded ${allPhotos.length} photos from backend:`, allPhotos);
+
+          // Preload all CDN images into browser disk cache
+          allPhotos.forEach(p => {
+            const img = new Image();
+            img.src = p.url || ("https://lh3.googleusercontent.com/d/" + p.driveId);
+          });
+
+          // Generate initial and pre-generate next pair using Elo matchmaking
+          currentPair = generateBalancedPair();
+          nextPair = generateBalancedPair();
+          displayCurrentPair();
+        } else {
+          showError();
+        }
+      } catch (e) {
+        console.error("[Init Error]", e);
+        showError();
+      }
+    }
+
+    function generateBalancedPair() {
+      const idx1 = Math.floor(Math.random() * allPhotos.length);
+      const photoA = allPhotos[idx1];
+
+      // Filter out candidates with the same base ID
+      let candidates = allPhotos.filter(p => p.baseId !== photoA.baseId);
+      if (candidates.length === 0) return generateBalancedPair();
+
+      // Sort candidates by closeness of Elo rating to photoA
+      candidates.sort((a, b) => {
+        const diffA = Math.abs(a.rating - photoA.rating);
+        const diffB = Math.abs(b.rating - photoA.rating);
+        return diffA - diffB;
+      });
+
+      // Pick randomly from the top 5 closest candidates
+      const poolSize = Math.max(1, Math.min(5, candidates.length));
+      const selectedIdx = Math.floor(Math.random() * poolSize);
+      const photoB = candidates[selectedIdx];
+
+      const urlA = photoA.url || ("https://lh3.googleusercontent.com/d/" + photoA.driveId);
+      const urlB = photoB.url || ("https://lh3.googleusercontent.com/d/" + photoB.driveId);
+
+      const sig = [photoA.id, photoB.id].sort().join("|");
+      if (sig === lastPairSig && allPhotos.length > 5) {
+        return generateBalancedPair();
+      }
+
+      lastPairSig = sig;
+      return { 
+        photoA: { id: photoA.id, rating: photoA.rating || 1400, url: urlA }, 
+        photoB: { id: photoB.id, rating: photoB.rating || 1400, url: urlB } 
+      };
+    }
+
+    function displayCurrentPair() {
+      if (!currentPair) return;
+
+      // Debug console log for active pairing and scores
+      console.log("%c[Pair Displayed]", "color: #2ecc71; font-weight: bold;", {
+        PhotoA: { id: currentPair.photoA.id, score: currentPair.photoA.rating },
+        PhotoB: { id: currentPair.photoB.id, score: currentPair.photoB.rating },
+        EloDifference: Math.abs(currentPair.photoA.rating - currentPair.photoB.rating)
+      });
+
+      document.getElementById("imgA").src = currentPair.photoA.url;
+      document.getElementById("imgB").src = currentPair.photoB.url;
+
+      document.getElementById("loader").classList.add("hidden");
+      const container = document.getElementById("photo-container");
+      container.classList.remove("hidden");
+      
+      setTimeout(() => {
+        container.classList.remove("fade-out");
+      }, 20);
+
+      isVotingLocked = false;
+    }
+
+    async function handleVote(choice) {
+      if (isVotingLocked || !currentPair) return;
+      isVotingLocked = true;
+
+      const winnerOverlay = choice === 'A' ? 'overlayA' : 'overlayB';
+      const loserOverlay = choice === 'A' ? 'overlayB' : 'overlayA';
+
+      const winnerId = choice === 'A' ? currentPair.photoA.id : currentPair.photoB.id;
+      const loserId = choice === 'A' ? currentPair.photoB.id : currentPair.photoA.id;
+
+      console.log(`[Vote Submitted] Winner: ${winnerId} | Loser: ${loserId}`);
+
+      // 1. Instant optimistic visual feedback
+      document.getElementById(winnerOverlay).className = "overlay winner show";
+      document.getElementById(loserOverlay).className = "overlay loser show";
+      
+      const container = document.getElementById("photo-container");
+      container.classList.add("fade-out");
+
+      // 2. Submit vote in background (zero blocking)
+      fetch(API_URL, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "submitVote",
+          sessionKey: currentSessionKey,
+          winner: winnerId,
+          loser: loserId
+        })
+      });
+
+      // 3. Immediately switch to pre-generated next balanced pair
+      setTimeout(() => {
+        document.getElementById("overlayA").className = "overlay";
+        document.getElementById("overlayB").className = "overlay";
+        
+        currentPair = nextPair;
+        nextPair = generateBalancedPair(); // Queue up the following one
+        displayCurrentPair();
+      }, 100);
+    }
+  </script>
+</body>
+</html>
